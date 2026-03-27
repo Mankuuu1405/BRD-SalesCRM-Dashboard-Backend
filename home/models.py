@@ -92,7 +92,15 @@ class Reminder(models.Model):
         ordering = ['due_date']
 
     def __str__(self):
-        return f"{self.title} - {self.lead.borrower_name if self.lead else 'No Lead'}"
+        if self.lead:
+            return f"{self.title} - {self.lead.borrower_name}"
+        else:
+            return f"{self.title} - General Reminder"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.due_date and self.due_date < timezone.now() - timezone.timedelta(days=365):
+            raise ValidationError('Due date cannot be more than 1 year in the past.')
 
 
 class Notification(models.Model):

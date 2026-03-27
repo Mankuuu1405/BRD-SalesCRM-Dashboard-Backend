@@ -1,11 +1,8 @@
 from django.contrib import admin
-
-# Register your models here.
-from .models import Lead,CRMTool
+from .models import Lead, CRMTool
 
 @admin.register(Lead)
 class LeadAdmin(admin.ModelAdmin):
-
     list_display = (
         "name",
         "loan_type",
@@ -46,9 +43,9 @@ class LeadAdmin(admin.ModelAdmin):
             "fields": ("created_at", "updated_at")
         }),
     )
+
 @admin.register(CRMTool)
 class CRMToolAdmin(admin.ModelAdmin):
-
     list_display = (
         "name",
         "status",

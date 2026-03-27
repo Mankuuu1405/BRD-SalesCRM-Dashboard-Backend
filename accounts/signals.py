@@ -16,6 +16,14 @@ def create_user_profiles(sender, instance, created, **kwargs):
         PrivacySettings.objects.get_or_create(user=instance)
         DataPrivacySettings.objects.get_or_create(user=instance)
 
+        # Create associated TeamMember for CRM reporting
+        try:
+            from home.models import TeamMember
+            TeamMember.objects.get_or_create(user=instance)
+        except (ImportError, Exception):
+            # Fallback if home app is not available or other issues
+            pass
+
 @receiver(post_save, sender=User)
 def save_user_profiles(sender, instance, **kwargs):
     # Ensure nested profile objects are saved if the user is saved
@@ -29,3 +37,17 @@ def save_user_profiles(sender, instance, **kwargs):
         instance.privacy_settings.save()
     if hasattr(instance, 'data_privacy_settings'):
         instance.data_privacy_settings.save()
+
+@receiver(post_save, sender=UserProfile)
+def sync_role_to_team_member(sender, instance, **kwargs):
+    # Sync the role from account profile to home team member for metrics/reports consistency
+    try:
+        from home.models import TeamMember
+        # Use get_or_create to handle missing TeamMembers during syncing
+        tm, created = TeamMember.objects.get_or_create(user=instance.user)
+        if tm.role != instance.role:
+            tm.role = instance.role
+            tm.save()
+    except (ImportError, Exception):
+        # Gracefully handle if home app is not available
+        pass

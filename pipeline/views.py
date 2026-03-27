@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from django.db.models import Count
 from .models import Lead,CRMTool
 from .serializers import LeadSerializer,CRMToolSerializer
+from .services import sync_crm_tool
 
 class LeadViewSet(viewsets.ModelViewSet):
 

@@ -108,14 +108,19 @@ class SignInView(views.APIView):
             last_name=last_name
         )
 
-        # Update profiles (created by signals)
+        # Create/Update profile (created by signals)
         profile = _get_or_create_profile(user)
         profile.role = role_slug
         profile.save()
 
-        if hasattr(user, 'team_member'):
-            user.team_member.role = role_slug
-            user.team_member.save()
+        # Create/Update TeamMember (from home app)
+        try:
+            from home.models import TeamMember
+            team_member, created = TeamMember.objects.get_or_create(user=user)
+            team_member.role = role_slug
+            team_member.save()
+        except ImportError:
+            pass
 
         refresh = RefreshToken.for_user(user)
         return Response({
@@ -256,7 +261,16 @@ class TeamMemberViewSet(viewsets.ViewSet):
     def create(self, request):
         email = request.data.get('email')
         name = request.data.get('name', '')
-        role = request.data.get('role', 'sales_executive')
+        role_label = request.data.get('role', 'Sales Executive')
+        
+        # Map role label to backend slug
+        role_map = {
+            'Sales Executive': 'sales_executive',
+            'Relationship Manager': 'relationship_manager',
+            'Team Lead': 'team_lead',
+            'Regional Manager': 'regional_manager',
+        }
+        role = role_map.get(role_label, 'sales_executive')
 
         if not email:
             return Response({'detail': 'Email is required.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -281,14 +295,55 @@ class TeamMemberViewSet(viewsets.ViewSet):
         profile.avatar_initials = name[0].upper() if name else email[0].upper()
         profile.save()
 
+        # Create/Update TeamMember (from home app) for reporting integration
+        try:
+            from home.models import TeamMember
+            team_member, created = TeamMember.objects.get_or_create(user=user)
+            team_member.role = role
+            team_member.save()
+        except ImportError:
+            pass
+
         return Response(TeamMemberAccountSerializer(user).data, status=status.HTTP_201_CREATED)
+
+    def partial_update(self, request, pk=None):
+        try:
+            user = User.objects.get(pk=pk)
+            name = request.data.get('name')
+            role_label = request.data.get('role')
+
+            if name:
+                parts = name.split(' ')
+                user.first_name = parts[0]
+                user.last_name = parts[1] if len(parts) > 1 else ''
+                user.save()
+
+            if role_label:
+                role_map = {
+                    'Sales Executive': 'sales_executive',
+                    'Relationship Manager': 'relationship_manager',
+                    'Team Lead': 'team_lead',
+                    'Regional Manager': 'regional_manager',
+                }
+                role = role_map.get(role_label, 'sales_executive')
+                profile = _get_or_create_profile(user)
+                profile.role = role
+                profile.save()
+                # The signal will sync this to home.TeamMember
+
+            return Response(TeamMemberAccountSerializer(user).data)
+        except User.DoesNotExist:
+            return Response({'detail': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
 
     def destroy(self, request, pk=None):
         try:
+            # Prevent deleting yourself
+            if str(request.user.id) == str(pk):
+                return Response({'detail': 'You cannot delete yourself.'}, status=status.HTTP_400_BAD_REQUEST)
+
             user = User.objects.get(pk=pk)
-            user.is_active = False # soft delete to preserve references
-            user.save()
-            return Response({'detail': 'Removed.'})
+            user.delete() # Hard delete from backend as per user request
+            return Response({'detail': 'Member deleted from backend successfully.'})
         except User.DoesNotExist:
             return Response({'detail': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
 

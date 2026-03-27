@@ -173,7 +173,7 @@ class DashboardViewSet(viewsets.ViewSet):
             week_end = now - timedelta(days=i * 7)
             count = active_qs.filter(created_at__gte=week_start, created_at__lt=week_end).count()
             weekly_data.append({
-                'week': week_start.strftime('%-d %b'),
+                'week': week_start.strftime('%d %b'),
                 'count': count
             })
 
@@ -193,14 +193,44 @@ class DashboardViewSet(viewsets.ViewSet):
                        LeadStage.APPROVED, LeadStage.DISBURSED]
         ).count()
         pct = round(applied / total * 100, 1) if total else 0
-        return Response({'current_value': pct, 'target': 60, 'total_leads': total, 'applied': applied})
+
+        # Build weekly trend for bar chart
+        weekly_data = []
+        for i in range(6, -1, -1):
+            week_start = now - timedelta(days=(i + 1) * 7)
+            week_end = now - timedelta(days=i * 7)
+            w_total = qs.filter(created_at__gte=week_start, created_at__lt=week_end).count()
+            w_applied = qs.filter(
+                created_at__gte=week_start, created_at__lt=week_end,
+                stage__in=[LeadStage.APPLICATION, LeadStage.DOCS_PENDING,
+                           LeadStage.APPROVED, LeadStage.DISBURSED]
+            ).count()
+            w_pct = round(w_applied / w_total * 100, 1) if w_total else 0
+            weekly_data.append({'week': week_start.strftime('%d %b'), 'value': w_pct})
+
+        return Response({'current_value': pct, 'target': 60, 'total_leads': total, 'applied': applied, 'weekly_data': weekly_data})
 
     def _avg_time_report(self, request, qs, now):
         avg = qs.filter(applied_at__isnull=False).annotate(
             dur=ExpressionWrapper(F('applied_at') - F('created_at'), output_field=DurationField())
         ).aggregate(avg=Avg('dur'))['avg']
         hrs = round(avg.total_seconds() / 3600, 1) if avg else 0
-        return Response({'current_value': hrs, 'unit': 'hours'})
+
+        # Weekly avg hours trend
+        weekly_data = []
+        for i in range(6, -1, -1):
+            week_start = now - timedelta(days=(i + 1) * 7)
+            week_end = now - timedelta(days=i * 7)
+            w_avg = qs.filter(
+                applied_at__isnull=False,
+                created_at__gte=week_start, created_at__lt=week_end
+            ).annotate(
+                dur=ExpressionWrapper(F('applied_at') - F('created_at'), output_field=DurationField())
+            ).aggregate(avg=Avg('dur'))['avg']
+            w_hrs = round(w_avg.total_seconds() / 3600, 1) if w_avg else 0
+            weekly_data.append({'week': week_start.strftime('%d %b'), 'value': w_hrs})
+
+        return Response({'current_value': hrs, 'unit': 'hours', 'weekly_data': weekly_data})
 
     def _incentives_report(self, request, qs, now):
         today = date.today()
@@ -208,7 +238,25 @@ class DashboardViewSet(viewsets.ViewSet):
         total = Incentive.objects.filter(
             team_member=request.user, month=first_day
         ).aggregate(total=Sum('amount'))['total'] or 0
-        return Response({'current_value': float(total), 'currency': 'INR'})
+
+        # Build weekly incentive trend (by month for last 7 months)
+        weekly_data = []
+        for i in range(6, -1, -1):
+            m = today.month - i
+            y = today.year
+            while m <= 0:
+                m += 12
+                y -= 1
+            month_start = date(y, m, 1)
+            amt = Incentive.objects.filter(
+                team_member=request.user, month=month_start
+            ).aggregate(total=Sum('amount'))['total'] or 0
+            weekly_data.append({
+                'week': month_start.strftime('%b %Y'),
+                'value': float(amt)
+            })
+
+        return Response({'current_value': float(total), 'currency': 'INR', 'weekly_data': weekly_data})
 
 
 # ── Lead ViewSet ───────────────────────────────────────────────────────────────
@@ -368,20 +416,32 @@ class ReminderViewSet(viewsets.ModelViewSet):
         is_completed = self.request.query_params.get('is_completed')
         if is_completed is not None:
             qs = qs.filter(is_completed=is_completed.lower() == 'true')
-
+            
         lead_id = self.request.query_params.get('lead_id')
         if lead_id:
             qs = qs.filter(lead_id=lead_id)
-
+            
         overdue = self.request.query_params.get('overdue')
         if overdue == 'true':
             qs = qs.filter(is_completed=False, due_date__lt=timezone.now())
-
+            
         upcoming = self.request.query_params.get('upcoming')
         if upcoming == 'true':
             qs = qs.filter(is_completed=False, due_date__gte=timezone.now())
-
+            
         return qs.order_by('due_date')
+
+    def create(self, request, *args, **kwargs):
+        print(f"Reminder creation request data: {request.data}")
+        print(f"Request headers: {dict(request.headers)}")
+        try:
+            return super().create(request, *args, **kwargs)
+        except Exception as e:
+            print(f"Error in create: {e}")
+            return Response(
+                {'detail': f'Failed to create reminder: {str(e)}', 'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -439,6 +499,109 @@ class TeamMemberViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return TeamMember.objects.select_related('user').order_by('user__first_name')
+
+    @action(detail=False, methods=['get'])
+    def performance(self, request):
+        """
+        Get team performance metrics for all team members
+        GET /api/team/performance/
+        """
+        # Get all team members with their assigned leads
+        team_members = TeamMember.objects.select_related('user').prefetch_related('user__assigned_leads')
+        
+        performance_data = []
+        
+        for member in team_members:
+            # Get all leads assigned to this team member
+            leads = Lead.objects.filter(assigned_to=member.user, is_active=True)
+            
+            # Calculate metrics
+            total_leads = leads.count()
+            applications = leads.filter(stage__in=['application', 'docs_pending', 'approved', 'disbursed']).count()
+            disbursed = leads.filter(stage='disbursed').count()
+            
+            # Calculate conversion rate
+            conversion_rate = 0
+            if total_leads > 0:
+                conversion_rate = round((disbursed / total_leads) * 100, 1)
+            
+            # Calculate total disbursed amount
+            total_disbursed_amount = leads.filter(stage='disbursed').aggregate(
+                total=Sum('ticket_size')
+            )['total'] or 0
+            
+            performance_data.append({
+                'id': member.id,
+                'name': member.user.get_full_name() or member.user.username,
+                'email': member.user.email,
+                'role': member.get_role_display(),
+                'leads': total_leads,
+                'applications': applications,
+                'disbursed': disbursed,
+                'conversion': conversion_rate,
+                'total_disbursed_amount': float(total_disbursed_amount),
+                'monthly_target': float(member.monthly_target) if member.monthly_target else 0,
+                'target_achievement': round((total_disbursed_amount / member.monthly_target) * 100, 1) if member.monthly_target > 0 else 0
+            })
+        
+        # Sort by conversion rate (highest first)
+        performance_data.sort(key=lambda x: x['conversion'], reverse=True)
+        
+        return Response(performance_data)
+
+    @action(detail=True, methods=['get'])
+    def individual_performance(self, request, pk=None):
+        """
+        Get detailed performance for a specific team member
+        GET /api/team/{id}/individual_performance/
+        """
+        member = self.get_object()
+        leads = Lead.objects.filter(assigned_to=member.user, is_active=True)
+        
+        # Weekly performance for last 4 weeks
+        four_weeks_ago = timezone.now() - timedelta(weeks=4)
+        weekly_data = []
+        
+        for i in range(4):
+            week_start = four_weeks_ago + timedelta(weeks=i)
+            week_end = week_start + timedelta(days=7)
+            
+            week_leads = leads.filter(created_at__range=[week_start, week_end])
+            week_applications = week_leads.filter(stage__in=['application', 'docs_pending', 'approved', 'disbursed'])
+            week_disbursed = week_leads.filter(stage='disbursed')
+            
+            weekly_data.append({
+                'week': f"Week {i + 1}",
+                'leads': week_leads.count(),
+                'applications': week_applications.count(),
+                'disbursed': week_disbursed.count(),
+                'disbursed_amount': float(week_disbursed.aggregate(total=Sum('ticket_size'))['total'] or 0)
+            })
+        
+        # Stage breakdown
+        stage_breakdown = leads.values('stage').annotate(
+            count=Count('id')
+        ).order_by('stage')
+        
+        performance_data = {
+            'member': {
+                'id': member.id,
+                'name': member.user.get_full_name() or member.user.username,
+                'role': member.get_role_display(),
+                'email': member.user.email
+            },
+            'summary': {
+                'total_leads': leads.count(),
+                'applications': leads.filter(stage__in=['application', 'docs_pending', 'approved', 'disbursed']).count(),
+                'disbursed': leads.filter(stage='disbursed').count(),
+                'conversion_rate': round((leads.filter(stage='disbursed').count() / leads.count() * 100), 1) if leads.count() > 0 else 0,
+                'total_disbursed_amount': float(leads.filter(stage='disbursed').aggregate(total=Sum('ticket_size'))['total'] or 0)
+            },
+            'weekly_performance': weekly_data,
+            'stage_breakdown': list(stage_breakdown)
+        }
+        
+        return Response(performance_data)
 
 
 

@@ -25,7 +25,7 @@ class UserBasicSerializer(serializers.ModelSerializer):
 
 
 class TeamMemberSerializer(serializers.ModelSerializer):
-    user = UserBasicSerializer(read_only=True)
+    user = UserBasicSerializer(read_only=False)
 
     class Meta:
         model = TeamMember
@@ -90,12 +90,18 @@ class ReminderSerializer(serializers.ModelSerializer):
             'is_completed', 'completed_at', 'is_overdue', 'created_at'
         ]
         read_only_fields = ['created_by', 'created_at', 'completed_at']
+        extra_kwargs = {
+            'allow_null': True  # Allow null values for optional fields
+        }
 
     def get_is_overdue(self, obj):
         return not obj.is_completed and obj.due_date < timezone.now()
 
     def create(self, validated_data):
         validated_data['created_by'] = self.context['request'].user
+        # If no lead provided, set it to null (optional reminder)
+        if 'lead' not in validated_data:
+            validated_data['lead'] = None
         return super().create(validated_data)
 
 

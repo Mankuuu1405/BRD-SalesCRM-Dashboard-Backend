@@ -61,6 +61,18 @@ class UserProfileSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'updated_at', 'full_name']
 
+    def validate_role(self, value):
+        # Map label to keys if necessary
+        role_map = {
+            'Sales Executive': 'sales_executive',
+            'Relationship Manager': 'relationship_manager',
+            'Team Lead': 'team_lead',
+            'Regional Manager': 'regional_manager',
+            'Admin': 'admin',
+        }
+        # If the value is a label, convert it. If it's already a key, keep it.
+        return role_map.get(value, value)
+
     def get_full_name(self, obj):
         return obj.user.get_full_name()
 
